@@ -1,16 +1,49 @@
-# React + Vite
+# Data Analysis Engine
 
-This template provides a minimal setup to get React working in Vite with HMR and some Oxlint rules.
+A six-module diagnostic workbench for Product/Growth PMs investigating metric movements.
 
-Currently, two official plugins are available:
+## Local Preview
 
-- [@vitejs/plugin-react](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react) uses [Oxc](https://oxc.rs)
-- [@vitejs/plugin-react-swc](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react-swc) uses [SWC](https://swc.rs/)
+```bash
+npm install
+npm run dev
+```
 
-## React Compiler
+## Publish With GitHub Desktop
 
-The React Compiler is not enabled on this template because of its impact on dev & build performances. To add it, see [this documentation](https://react.dev/learn/react-compiler/installation).
+1. Open GitHub Desktop.
+2. Choose **File -> Add Local Repository**.
+3. Select this folder:
 
-## Expanding the Oxlint configuration
+   ```text
+   /Users/nishantagarwal/Documents/Data Analysis Engine
+   ```
 
-If you are developing a production application, we recommend using TypeScript with type-aware lint rules enabled. Check out the [TS template](https://github.com/vitejs/vite/tree/main/packages/create-vite/template-react-ts) for information on how to integrate TypeScript and Oxlint's TypeScript related rules in your project.
+4. If prompted, create a Git repository for this folder.
+5. Commit the files with a message like:
+
+   ```text
+   Build six-module data analysis app
+   ```
+
+6. Click **Publish repository**.
+7. Uncheck **Keep this code private**.
+8. Publish the repository.
+
+## Make The App Public
+
+This repo includes a GitHub Actions workflow at `.github/workflows/deploy-pages.yml`.
+
+After publishing:
+
+1. Open the repository on GitHub.com.
+2. Go to **Settings -> Pages**.
+3. Under **Build and deployment**, choose **GitHub Actions**.
+4. Push the latest commit from GitHub Desktop if needed.
+5. Wait for the **Deploy to GitHub Pages** action to finish.
+
+The public app URL will look like:
+
+```text
+https://YOUR_GITHUB_USERNAME.github.io/YOUR_REPOSITORY_NAME/
+```
