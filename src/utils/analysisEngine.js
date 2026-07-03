@@ -26,6 +26,186 @@ const periodRows = (data, dateCol, period = {}) => {
   });
 };
 
+const isNumericColumn = (data, column) => {
+  const sampled = data.slice(0, 100);
+  const populated = sampled.filter((row) => row[column] !== undefined && row[column] !== "");
+  if (!populated.length) return false;
+  const numericCount = populated.filter((row) => Number.isFinite(parseFloat(row[column]))).length;
+  return numericCount / populated.length >= 0.8;
+};
+
+const isLikelyDateColumn = (data, column) => {
+  const lower = column.toLowerCase();
+  const nameLooksDate = lower.includes("date") || lower.includes("time") || lower.includes("stamp");
+  const sampled = data.slice(0, 100).filter((row) => row[column]);
+  if (!sampled.length) return false;
+  const parseableCount = sampled.filter((row) => !Number.isNaN(Date.parse(row[column]))).length;
+  return nameLooksDate || parseableCount / sampled.length >= 0.8;
+};
+
+const detectGrain = (data, dateColumns, categoricalColumns) => {
+  if (!data.length) return "Unknown";
+  if (!dateColumns.length) return "No date grain";
+  const dateCol = dateColumns[0];
+  const uniqueDates = new Set(data.map((row) => row[dateCol]).filter(Boolean)).size;
+  if (uniqueDates <= 1) return "Single period";
+  if (categoricalColumns.length >= 2) return "Time-series by segment";
+  if (categoricalColumns.length === 1) return "Time-series by one segment";
+  return "Time-series aggregate";
+};
+
+export function analyzeDatasetReadiness(data) {
+  const columns = Object.keys(data[0] || {});
+  const rowCount = data.length;
+  const numericColumns = columns.filter((column) => isNumericColumn(data, column));
+  const dateColumns = columns.filter((column) => isLikelyDateColumn(data, column));
+  const categoricalColumns = columns.filter((column) => !numericColumns.includes(column) && !dateColumns.includes(column));
+  const diagnosticColumns = columns.filter((column) => {
+    const lower = column.toLowerCase();
+    return [
+      "error",
+      "latency",
+      "load",
+      "duration",
+      "version",
+      "release",
+      "experiment",
+      "flag",
+      "campaign",
+      "source",
+      "channel",
+      "browser",
+      "device",
+      "plan",
+    ].some((token) => lower.includes(token));
+  });
+
+  const missingValues = columns.map((column) => {
+    const missing = data.filter((row) => row[column] === undefined || row[column] === "").length;
+    return { column, missing, pctMissing: rowCount ? (missing / rowCount) * 100 : 0 };
+  }).filter((row) => row.missing > 0).sort((a, b) => b.pctMissing - a.pctMissing);
+
+  const dateValues = dateColumns[0]
+    ? data.map((row) => row[dateColumns[0]]).filter(Boolean).sort()
+    : [];
+  const uniqueDates = new Set(dateValues).size;
+  const hasDate = dateColumns.length > 0;
+  const hasRateInputs = numericColumns.length >= 2;
+  const hasDrivers = numericColumns.length >= 4;
+  const hasSegments = categoricalColumns.length > 0;
+  const hasControlSignals = diagnosticColumns.length > 0;
+  const hasTimeDepth = uniqueDates >= 2;
+  const highMissingColumns = missingValues.filter((row) => row.pctMissing > 25);
+
+  const modules = [
+    {
+      key: "validation",
+      label: "Validate drop",
+      supported: hasDate && hasRateInputs && hasTimeDepth,
+      strength: hasDate && hasRateInputs && uniqueDates >= 7 ? "Strong" : hasDate && hasRateInputs ? "Partial" : "Blocked",
+      reason: hasDate && hasRateInputs
+        ? "The file has a date column and numeric count fields for current vs baseline periods."
+        : "Needs a date column plus numerator and denominator count fields.",
+    },
+    {
+      key: "decomposition",
+      label: "Driver decomposition",
+      supported: hasRateInputs && hasDrivers,
+      strength: hasDrivers ? "Strong" : hasRateInputs ? "Partial" : "Blocked",
+      reason: hasDrivers
+        ? "Multiple numeric fields can be mapped into primary and driver metrics."
+        : "Needs additional funnel-step or driver count columns beyond the primary metric.",
+    },
+    {
+      key: "trend",
+      label: "Breakpoint",
+      supported: hasDate && hasRateInputs && uniqueDates >= 3,
+      strength: uniqueDates >= 14 ? "Strong" : uniqueDates >= 3 ? "Partial" : "Blocked",
+      reason: uniqueDates >= 3
+        ? `${uniqueDates} distinct dates can support a basic timeline.`
+        : "Needs several dated observations to detect when the movement started.",
+    },
+    {
+      key: "segments",
+      label: "Segment impact",
+      supported: hasRateInputs && hasSegments,
+      strength: categoricalColumns.length >= 2 ? "Strong" : hasSegments ? "Partial" : "Blocked",
+      reason: hasSegments
+        ? "Categorical fields can localize impact by cohort."
+        : "Needs dimensions such as device, country, channel, plan, browser, or cohort.",
+    },
+    {
+      key: "comparison",
+      label: "Cohort comparison",
+      supported: hasSegments && (categoricalColumns.length >= 2 || hasControlSignals),
+      strength: categoricalColumns.length >= 2 && hasControlSignals ? "Strong" : hasSegments ? "Partial" : "Blocked",
+      reason: hasSegments
+        ? "The file can compare failing and stable groups, but richer signal columns improve contrast."
+        : "Needs segment fields to form test and control cohorts.",
+    },
+    {
+      key: "hypotheses",
+      label: "Hypotheses",
+      supported: hasDate && hasRateInputs,
+      strength: hasControlSignals && hasSegments ? "Strong" : hasDate && hasRateInputs ? "Partial" : "Blocked",
+      reason: hasControlSignals
+        ? "Diagnostic fields can support more specific cause hypotheses."
+        : "Without error, latency, release, campaign, or platform signals, hypotheses should stay low confidence.",
+    },
+  ];
+
+  const blockedModules = modules.filter((module) => !module.supported);
+  const partialModules = modules.filter((module) => module.supported && module.strength !== "Strong");
+  const blockers = [
+    !hasDate ? "Add a date or timestamp column." : "",
+    !hasRateInputs ? "Add at least two numeric count columns so the app can compute a rate." : "",
+    !hasTimeDepth ? "Include multiple dates or periods to compare movement over time." : "",
+  ].filter(Boolean);
+  const recommendedData = [
+    !hasDrivers ? "Driver/funnel-step counts such as add_to_cart_clicks, trials, orders, paid_subscriptions." : "",
+    !hasSegments ? "Segment fields such as device, browser, country, channel, plan, cohort, landing page." : "",
+    !hasControlSignals ? "Diagnostic signals such as error_count, page_load_ms, release_version, experiment, campaign." : "",
+    highMissingColumns.length ? "Fill high-missing columns or remove them from the investigation." : "",
+  ].filter(Boolean);
+
+  const score = modules.reduce((sum, module) => {
+    if (module.strength === "Strong") return sum + 2;
+    if (module.strength === "Partial") return sum + 1;
+    return sum;
+  }, 0);
+  const maxScore = modules.length * 2;
+  const status = blockers.length
+    ? "Not suitable"
+    : score >= maxScore - 2
+      ? "Ready"
+      : "Partial";
+
+  return {
+    status,
+    score,
+    maxScore,
+    rowCount,
+    columnCount: columns.length,
+    dateColumns,
+    numericColumns,
+    categoricalColumns,
+    diagnosticColumns,
+    missingValues,
+    dateRange: dateValues.length ? { start: dateValues[0], end: dateValues[dateValues.length - 1], uniqueDates } : null,
+    grain: detectGrain(data, dateColumns, categoricalColumns),
+    modules,
+    blockers,
+    recommendedData,
+    summary: status === "Ready"
+      ? "This file has the basic evidence needed for a metric-drop investigation."
+      : status === "Partial"
+        ? "This file can support part of the investigation, but some modules should run with lower confidence."
+        : "This file is not yet connected enough to the analysis question.",
+    blockedModules: blockedModules.map((module) => module.label),
+    partialModules: partialModules.map((module) => module.label),
+  };
+}
+
 export function buildDataQualityReport(data, config, metricConfig) {
   const issues = [];
   const warnings = [];

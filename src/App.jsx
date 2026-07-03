@@ -35,6 +35,7 @@ import {
 } from "lucide-react";
 import { ecommerceData, saasSubscriptionData } from "./data/sandbox";
 import {
+  analyzeDatasetReadiness,
   buildDataQualityReport,
   runDropValidation,
   runDriverDecomposition,
@@ -168,6 +169,12 @@ function Badge({ tone = "neutral", children }) {
   return <span className={`badge badge-${tone}`}>{children}</span>;
 }
 
+const readinessTone = (status) => {
+  if (status === "Ready") return "green";
+  if (status === "Partial") return "yellow";
+  return "danger";
+};
+
 function EvidenceCard({ title, icon: Icon = ClipboardList, children }) {
   return (
     <section className="evidence-card">
@@ -216,6 +223,7 @@ function App() {
   const [results, setResults] = useState(null);
   const [selectedSegmentDim, setSelectedSegmentDim] = useState("");
   const [formErrors, setFormErrors] = useState([]);
+  const [readiness, setReadiness] = useState(null);
   const [selectedTemplateId, setSelectedTemplateId] = useState("conversion");
   const [wizardConfig, setWizardConfig] = useState({
     metric: "Conversion_Rate",
@@ -302,6 +310,7 @@ function App() {
     });
     setMetricConfig(mConfig);
     setIsWizard(false);
+    setReadiness(analyzeDatasetReadiness(rawData));
     setFormErrors([]);
   };
 
@@ -320,18 +329,20 @@ function App() {
         }
         const rows = response.data;
         const columns = Object.keys(rows[0]);
+        const readinessReport = analyzeDatasetReadiness(rows);
         const dateCol = columns.find((column) => {
           const lower = column.toLowerCase();
           return lower.includes("date") || lower.includes("time") || lower.includes("stamp");
-        }) || "";
+        }) || readinessReport.dateColumns[0] || "";
 
         setData(rows);
         setAvailableColumns(columns);
         setResults(null);
         setConfig(null);
         setMetricConfig(null);
+        setReadiness(readinessReport);
         setIsWizard(true);
-        setFormErrors([]);
+        setFormErrors(readinessReport.blockers);
         setWizardConfig((prev) => ({
           ...prev,
           date_column: dateCol,
@@ -378,12 +389,22 @@ function App() {
       segments: wizardConfig.segments,
     };
     const quality = buildDataQualityReport(data, runConfig, mConfig);
+    const readinessReport = analyzeDatasetReadiness(data);
 
+    if (readinessReport.status === "Not suitable") {
+      setReadiness(readinessReport);
+      setFormErrors([
+        "This file is not suitable for the diagnosis yet.",
+        ...readinessReport.blockers,
+      ]);
+      return;
+    }
     if (!quality.ok) {
       setFormErrors(quality.issues);
       return;
     }
 
+    setReadiness(readinessReport);
     setConfig(runConfig);
     setMetricConfig(mConfig);
     setIsWizard(false);
@@ -398,6 +419,7 @@ function App() {
     setResults(null);
     setIsWizard(false);
     setFormErrors([]);
+    setReadiness(null);
     setActiveStep(1);
   };
 
@@ -414,7 +436,14 @@ function App() {
       `Primary driver: ${currentSummary.driver}`,
       `Breakpoint: ${currentSummary.breakpoint}`,
       `Affected cohort: ${currentSummary.cohort}`,
+      readiness ? `Dataset readiness: ${readiness.status} (${readiness.score}/${readiness.maxScore})` : "",
       "",
+      readiness ? "## Dataset Readiness" : "",
+      readiness ? readiness.summary : "",
+      readiness?.blockers?.length ? "" : "",
+      ...(readiness?.blockers?.length ? ["Blocking gaps:", ...readiness.blockers.map((item) => `- ${item}`)] : []),
+      ...(readiness?.recommendedData?.length ? ["Recommended evidence:", ...readiness.recommendedData.map((item) => `- ${item}`)] : []),
+      readiness ? "" : "",
       "## Executive Summary",
       results.hypothesis.executiveSummary,
       "",
@@ -484,10 +513,10 @@ function App() {
         <main className="wizard-layout">
           <section className="panel wizard-intro">
             <div>
-              <Badge tone="blue">Metric model builder</Badge>
-              <h2>Map the CSV into a PM-readable diagnosis</h2>
+              <Badge tone="blue">Step 0 + metric model</Badge>
+              <h2>Check whether this file can support the diagnosis</h2>
               <p>
-                Pick the business model, map the columns, choose comparison windows, and select the segment fields that can explain where the movement lives.
+                First confirm the dataset has the evidence needed for the analysis. Then map the business model, periods, drivers, and segments.
               </p>
             </div>
             <div className="template-grid">
@@ -504,6 +533,10 @@ function App() {
               ))}
             </div>
           </section>
+
+          {readiness && (
+            <DataReadinessPanel readiness={readiness} />
+          )}
 
           {formErrors.length > 0 && (
             <GuardrailPanel issues={formErrors} />
@@ -634,7 +667,12 @@ function App() {
                 ))}
             </div>
             <div className="action-row">
-              <button className="btn btn-primary" onClick={handleRunCustomAnalysis} type="button">
+              <button
+                className="btn btn-primary"
+                disabled={readiness?.status === "Not suitable"}
+                onClick={handleRunCustomAnalysis}
+                type="button"
+              >
                 <Search size={16} />
                 Run diagnosis
               </button>
@@ -857,6 +895,86 @@ function SandboxCard({ title, description, metric, onClick }) {
       </div>
       <ArrowRight size={20} />
     </button>
+  );
+}
+
+function DataReadinessPanel({ readiness }) {
+  const profileRows = [
+    ["Rows", readiness.rowCount.toLocaleString()],
+    ["Columns", readiness.columnCount],
+    ["Detected grain", readiness.grain],
+    ["Date range", readiness.dateRange ? `${readiness.dateRange.start} to ${readiness.dateRange.end}` : "Not detected"],
+    ["Numeric columns", readiness.numericColumns.length],
+    ["Categorical columns", readiness.categoricalColumns.length],
+    ["Diagnostic signals", readiness.diagnosticColumns.length || "None detected"],
+  ];
+
+  return (
+    <section className="panel readiness-panel">
+      <div className="readiness-hero">
+        <div>
+          <Badge tone={readinessTone(readiness.status)}>Step 0: {readiness.status}</Badge>
+          <h2>Is this the right data?</h2>
+          <p>{readiness.summary}</p>
+        </div>
+        <div className="readiness-score">
+          <span>Readiness score</span>
+          <strong>{readiness.score}/{readiness.maxScore}</strong>
+        </div>
+      </div>
+
+      <div className="readiness-grid">
+        <EvidenceCard title="Dataset profile" icon={ClipboardList}>
+          <DataTable compact columns={["Check", "Detected"]} rows={profileRows} />
+        </EvidenceCard>
+
+        <EvidenceCard title="What this file can support" icon={ShieldCheck}>
+          <div className="module-readiness-list">
+            {readiness.modules.map((module) => (
+              <div className="module-readiness-row" key={module.key}>
+                <div>
+                  <strong>{module.label}</strong>
+                  <p>{module.reason}</p>
+                </div>
+                <Badge tone={module.strength === "Strong" ? "green" : module.strength === "Partial" ? "yellow" : "danger"}>
+                  {module.strength}
+                </Badge>
+              </div>
+            ))}
+          </div>
+        </EvidenceCard>
+      </div>
+
+      <div className="readiness-grid">
+        <EvidenceCard title="Missing evidence to improve confidence" icon={AlertTriangle}>
+          {readiness.recommendedData.length ? (
+            <ul className="plain-list">
+              {readiness.recommendedData.map((item) => <li key={item}>{item}</li>)}
+            </ul>
+          ) : (
+            <p className="empty-state">No major evidence gaps detected. Continue to mapping.</p>
+          )}
+        </EvidenceCard>
+
+        <EvidenceCard title="Column signals" icon={Target}>
+          <div className="signal-blocks">
+            <SignalBlock label="Date" values={readiness.dateColumns} />
+            <SignalBlock label="Numeric" values={readiness.numericColumns.slice(0, 8)} />
+            <SignalBlock label="Segments" values={readiness.categoricalColumns.slice(0, 8)} />
+            <SignalBlock label="Diagnostic" values={readiness.diagnosticColumns.slice(0, 8)} />
+          </div>
+        </EvidenceCard>
+      </div>
+    </section>
+  );
+}
+
+function SignalBlock({ label, values }) {
+  return (
+    <div className="signal-block">
+      <span>{label}</span>
+      <p>{values.length ? values.join(", ") : "None detected"}</p>
+    </div>
   );
 }
 
