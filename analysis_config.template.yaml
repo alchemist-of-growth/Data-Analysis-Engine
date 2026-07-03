@@ -1,0 +1,54 @@
+# Data Analysis Engine Configuration Template
+# Copy this file to `analysis_config.yaml` in the root and fill in your details.
+
+# Path to the data file. Can be relative to the project root or absolute.
+# Supported formats: CSV, TSV, Parquet.
+data_file_path: "path/to/your/dataset.csv"
+
+# The name of the primary metric that has dropped.
+# This metric must be present as a column or be computable from the dataset.
+metric: "Conversion_Rate"
+
+# The column containing the date or timestamp.
+date_column: "timestamp"
+
+# Date format if needed (e.g. "%Y-%m-%d" or "%Y-%m-%d %H:%M:%S"). If empty, pandas will parse automatically.
+date_format: "%Y-%m-%d"
+
+# Time periods for the analysis.
+# Format: "YYYY-MM-DD" or similar timestamp matching the date format.
+periods:
+  # The period where the metric dropped (e.g. "Last week")
+  analysed_period:
+    start: "2026-06-21"
+    end: "2026-06-27"
+  
+  # The baseline period immediately preceding the drop (e.g. "Week before last")
+  previous_period:
+    start: "2026-06-14"
+    end: "2026-06-20"
+  
+  # The historical baseline to control for seasonality (e.g. "Same week last year")
+  same_period_last_year:
+    start: "2025-06-22"
+    end: "2025-06-28"
+
+# Mathematical decomposition formula of the primary metric into its driving sub-metrics.
+# This should be expressed as one or more formulas using simple math operators (*, /, +, -).
+# Example: 
+#   Conversion_Rate = Orders / Sessions
+#   Or:
+#   AOV = Revenue / Orders
+#   Revenue = Traffic * Conversion_Rate * AOV
+formulas:
+  - "Conversion_Rate = Add_to_Cart_Rate * Cart_to_Checkout_Rate * Checkout_to_Purchase_Rate"
+  - "Add_to_Cart_Rate = Add_to_Cart_Clicks / Sessions"
+
+# Categorical dimensions to segment the data and find contributing drops.
+# The engine will slice the metrics along these dimensions.
+segments:
+  - "device"
+  - "browser"
+  - "country"
+  - "traffic_source"
+  - "landing_page"
