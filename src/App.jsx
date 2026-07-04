@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useState } from "react";
+import React, { useEffect, useMemo, useState, useRef } from "react";
 import Papa from "papaparse";
 import {
   Bar,
@@ -152,6 +152,14 @@ const moduleDefinitions = [
     icon: Sparkles,
     question: "What should the PM validate next?",
   },
+  {
+    step: 7,
+    key: "brief",
+    title: "Investigation Brief",
+    shortTitle: "Brief Preview",
+    icon: FileText,
+    question: "Review, copy, and export the PM-ready investigation brief.",
+  },
 ];
 
 const formatRate = (value) => `${((value || 0) * 100).toFixed(2)}%`;
@@ -174,6 +182,118 @@ const readinessTone = (status) => {
   if (status === "Partial") return "yellow";
   return "danger";
 };
+
+const formatColumn = (col) => {
+  if (/\s/.test(col) || /[^a-zA-Z0-9_]/.test(col)) {
+    return `[${col}]`;
+  }
+  return col;
+};
+
+const parseRatioFormula = (formulaStr) => {
+  if (!formulaStr) return null;
+  const parts = formulaStr.split("/");
+  if (parts.length !== 2) return null;
+  const clean = (part) => part.trim().replace(/^\[|\]$/g, "").replace(/^['"]|['"]$/g, "").trim();
+  return {
+    num: clean(parts[0]),
+    den: clean(parts[1])
+  };
+};
+
+const validateFormula = (formulaStr, columns) => {
+  if (!formulaStr || !formulaStr.trim()) {
+    return { ok: false, error: "Formula is empty" };
+  }
+  const parsed = parseRatioFormula(formulaStr);
+  if (!parsed) {
+    return { ok: false, error: "Formula must be in the format 'Numerator / Denominator'" };
+  }
+  const { num, den } = parsed;
+  if (!num && !den) {
+    return { ok: false, error: "Numerator and denominator cannot be blank" };
+  }
+  if (!num) {
+    return { ok: false, error: "Numerator cannot be blank" };
+  }
+  if (!den) {
+    return { ok: false, error: "Denominator cannot be blank" };
+  }
+  const numExists = columns.includes(num);
+  const denExists = columns.includes(den);
+  
+  if (!numExists && !denExists) {
+    return { ok: false, error: `Columns "${num}" and "${den}" not found in CSV` };
+  }
+  if (!numExists) {
+    return { ok: false, error: `Column "${num}" not found in CSV` };
+  }
+  if (!denExists) {
+    return { ok: false, error: `Column "${den}" not found in CSV` };
+  }
+  return { ok: true, parsed };
+};
+
+function FormulaInput({ value, onChange, columns, placeholder }) {
+  const [showSuggestions, setShowSuggestions] = useState(false);
+  const inputRef = useRef(null);
+  const containerRef = useRef(null);
+
+  useEffect(() => {
+    const handleOutsideClick = (e) => {
+      if (containerRef.current && !containerRef.current.contains(e.target)) {
+        setShowSuggestions(false);
+      }
+    };
+    document.addEventListener("mousedown", handleOutsideClick);
+    return () => document.removeEventListener("mousedown", handleOutsideClick);
+  }, []);
+
+  const parts = value.split("/");
+  const currentToken = (parts[parts.length - 1] || "").trim().toLowerCase();
+  
+  const suggestions = useMemo(() => {
+    if (!columns || !columns.length) return [];
+    return columns.filter((col) => col.toLowerCase().includes(currentToken));
+  }, [columns, currentToken]);
+
+  const selectSuggestion = (col) => {
+    if (parts.length <= 1) {
+      const formatted = formatColumn(col);
+      onChange(`${formatted} / `);
+    } else {
+      const num = parts[0].trim();
+      const formatted = formatColumn(col);
+      onChange(`${num} / ${formatted}`);
+    }
+    setShowSuggestions(false);
+    inputRef.current?.focus();
+  };
+
+  return (
+    <div className="formula-input-container" ref={containerRef}>
+      <input
+        ref={inputRef}
+        type="text"
+        value={value}
+        placeholder={placeholder}
+        onChange={(e) => onChange(e.target.value)}
+        onFocus={() => setShowSuggestions(true)}
+        className="formula-input"
+      />
+      {showSuggestions && suggestions.length > 0 && (
+        <ul className="suggestions-dropdown">
+          {suggestions.slice(0, 10).map((col) => (
+            <li key={col} onMouseDown={() => selectSuggestion(col)}>
+              <span className="suggestion-col-name">{col}</span>
+              <small className="suggestion-type">Column</small>
+            </li>
+          ))}
+        </ul>
+      )}
+    </div>
+  );
+}
 
 function EvidenceCard({ title, icon: Icon = ClipboardList, children }) {
   return (
@@ -228,8 +348,7 @@ function App() {
   const [wizardConfig, setWizardConfig] = useState({
     metric: "Conversion_Rate",
     date_column: "",
-    primary_num: "",
-    primary_den: "",
+    primary_formula: "",
     periods: {
       analysed_period: { start: "", end: "" },
       previous_period: { start: "", end: "" },
@@ -237,10 +356,63 @@ function App() {
     },
     segments: [],
     drivers: [
-      { name: "Add_to_Cart_Rate", num: "", den: "" },
-      { name: "Cart_to_Purchase_Rate", num: "", den: "" },
+      { name: "Add_to_Cart_Rate", formula: "" },
+      { name: "Cart_to_Purchase_Rate", formula: "" },
     ],
   });
+
+  const [history, setHistory] = useState(() => {
+    try {
+      const saved = localStorage.getItem("data_analysis_history");
+      return saved ? JSON.parse(saved) : [];
+    } catch {
+      return [];
+    }
+  });
+
+  const saveToHistory = (newConfig, newResults, newFileName) => {
+    const newSession = {
+      id: Date.now().toString(),
+      name: `${newFileName} - ${newConfig.metric}`,
+      fileName: newFileName,
+      config: newConfig,
+      results: newResults,
+      date: new Date().toLocaleDateString(undefined, {
+        month: "short",
+        day: "numeric",
+        year: "numeric",
+        hour: "2-digit",
+        minute: "2-digit",
+      }),
+    };
+    
+    setHistory((prev) => {
+      const filtered = prev.filter((item) => item.name !== newSession.name);
+      const updated = [newSession, ...filtered].slice(0, 10);
+      localStorage.setItem("data_analysis_history", JSON.stringify(updated));
+      return updated;
+    });
+  };
+
+  const deleteFromHistory = (id, event) => {
+    event.stopPropagation();
+    setHistory((prev) => {
+      const updated = prev.filter((item) => item.id !== id);
+      localStorage.setItem("data_analysis_history", JSON.stringify(updated));
+      return updated;
+    });
+  };
+
+  const loadFromHistory = (session) => {
+    setFileName(session.fileName);
+    setConfig(session.config);
+    setResults(session.results);
+    setMetricConfig(null);
+    setData([]);
+    setIsWizard(false);
+    setSelectedSegmentDim(session.config.segments[0] || "");
+    setActiveStep(1);
+  };
 
   const qualityReport = useMemo(() => (
     data.length && config && metricConfig
@@ -270,16 +442,23 @@ function App() {
   const applyTemplate = (templateId, columns = availableColumns) => {
     const template = metricTemplates.find((item) => item.id === templateId) || metricTemplates[0];
     setSelectedTemplateId(template.id);
+    
+    const pNum = detectColumn(columns, [template.primaryHint[0]]) || "";
+    const pDen = detectColumn(columns, [template.primaryHint[1]]) || "";
+    const primary_formula = pNum && pDen ? `${formatColumn(pNum)} / ${formatColumn(pDen)}` : "";
+
     setWizardConfig((prev) => ({
       ...prev,
       metric: template.metric,
-      primary_num: detectColumn(columns, [template.primaryHint[0], prev.primary_num]) || prev.primary_num,
-      primary_den: detectColumn(columns, [template.primaryHint[1], prev.primary_den]) || prev.primary_den,
-      drivers: template.drivers.map((driver, index) => ({
-        name: driver.name,
-        num: detectColumn(columns, [driver.hint[0], prev.drivers[index]?.num]) || prev.drivers[index]?.num || "",
-        den: detectColumn(columns, [driver.hint[1], prev.drivers[index]?.den]) || prev.drivers[index]?.den || "",
-      })),
+      primary_formula,
+      drivers: template.drivers.map((driver) => {
+        const dNum = detectColumn(columns, [driver.hint[0]]) || "";
+        const dDen = detectColumn(columns, [driver.hint[1]]) || "";
+        return {
+          name: driver.name,
+          formula: dNum && dDen ? `${formatColumn(dNum)} / ${formatColumn(dDen)}` : "",
+        };
+      }),
     }));
   };
 
@@ -370,17 +549,53 @@ function App() {
     ].join("\n");
     downloadText("data_analysis_template.csv", rows, "text/csv");
   };
+  const handleAddDriver = () => {
+    setWizardConfig((prev) => ({
+      ...prev,
+      drivers: [...prev.drivers, { name: "", formula: "" }],
+    }));
+  };
+
+  const handleRemoveDriver = (index) => {
+    setWizardConfig((prev) => ({
+      ...prev,
+      drivers: prev.drivers.filter((_, i) => i !== index),
+    }));
+  };
 
   const handleRunCustomAnalysis = () => {
-    const mConfig = {
-      primary: { num: wizardConfig.primary_num, den: wizardConfig.primary_den },
-      drivers: {},
-    };
-    wizardConfig.drivers.forEach((driver) => {
-      if (driver.name && driver.num && driver.den) {
-        mConfig.drivers[driver.name] = { num: driver.num, den: driver.den };
+    const primaryVal = validateFormula(wizardConfig.primary_formula, availableColumns);
+    if (!primaryVal.ok) {
+      setFormErrors([`Primary Metric Formula Error: ${primaryVal.error}`]);
+      return;
+    }
+
+    const drivers = {};
+    const driverErrors = [];
+    wizardConfig.drivers.forEach((driver, idx) => {
+      if (driver.name || driver.formula) {
+        if (!driver.name) {
+          driverErrors.push(`Driver ${idx + 1}: Name is required`);
+          return;
+        }
+        const val = validateFormula(driver.formula, availableColumns);
+        if (!val.ok) {
+          driverErrors.push(`Driver "${driver.name}": ${val.error}`);
+        } else {
+          drivers[driver.name] = { num: val.parsed.num, den: val.parsed.den };
+        }
       }
     });
+
+    if (driverErrors.length > 0) {
+      setFormErrors(driverErrors);
+      return;
+    }
+
+    const mConfig = {
+      primary: { num: primaryVal.parsed.num, den: primaryVal.parsed.den },
+      drivers,
+    };
 
     const runConfig = {
       metric: wizardConfig.metric,
@@ -478,6 +693,10 @@ function App() {
     downloadText(`${config.metric}_investigation_brief.md`, buildBrief(), "text/markdown");
   };
 
+  const handleCopyBrief = (text) => {
+    navigator.clipboard.writeText(text);
+  };
+
   useEffect(() => {
     if (!data.length || !config || !metricConfig) return;
 
@@ -498,13 +717,16 @@ function App() {
         config
       );
 
-      setResults({ validation, decomposition, trend, breakdown, comparison, hypothesis });
+      const computedResults = { validation, decomposition, trend, breakdown, comparison, hypothesis };
+      setResults(computedResults);
       setSelectedSegmentDim(config.segments[0] || "");
       setActiveStep(1);
+      
+      saveToHistory(config, computedResults, fileName);
     } catch (error) {
       setFormErrors([`Pipeline computation failed: ${error.message}`]);
     }
-  }, [data, config, metricConfig]);
+  }, [data, config, metricConfig, fileName]);
 
   if (isWizard) {
     return (
@@ -564,20 +786,12 @@ function App() {
                   onChange={(event) => setWizardConfig({ ...wizardConfig, metric: event.target.value })}
                 />
               </Field>
-              <Field label="Primary numerator">
-                <ColumnSelect
-                  value={wizardConfig.primary_num}
+              <Field label="Primary metric formula">
+                <FormulaInput
+                  value={wizardConfig.primary_formula}
                   columns={availableColumns}
-                  placeholder="Example: orders"
-                  onChange={(value) => setWizardConfig({ ...wizardConfig, primary_num: value })}
-                />
-              </Field>
-              <Field label="Primary denominator">
-                <ColumnSelect
-                  value={wizardConfig.primary_den}
-                  columns={availableColumns}
-                  placeholder="Example: sessions"
-                  onChange={(value) => setWizardConfig({ ...wizardConfig, primary_den: value })}
+                  placeholder="Example: orders / sessions"
+                  onChange={(value) => setWizardConfig({ ...wizardConfig, primary_formula: value })}
                 />
               </Field>
             </div>
@@ -596,27 +810,39 @@ function App() {
                   <Field label={`Driver ${index + 1} name`}>
                     <input
                       value={driver.name}
+                      placeholder="Example: Add_to_Cart_Rate"
                       onChange={(event) => updateDriver(index, "name", event.target.value, wizardConfig, setWizardConfig)}
                     />
                   </Field>
-                  <Field label="Numerator">
-                    <ColumnSelect
-                      value={driver.num}
+                  <Field label="Formula">
+                    <FormulaInput
+                      value={driver.formula}
                       columns={availableColumns}
-                      placeholder="Select column"
-                      onChange={(value) => updateDriver(index, "num", value, wizardConfig, setWizardConfig)}
+                      placeholder="Example: add_to_cart_clicks / sessions"
+                      onChange={(value) => updateDriver(index, "formula", value, wizardConfig, setWizardConfig)}
                     />
                   </Field>
-                  <Field label="Denominator">
-                    <ColumnSelect
-                      value={driver.den}
-                      columns={availableColumns}
-                      placeholder="Select column"
-                      onChange={(value) => updateDriver(index, "den", value, wizardConfig, setWizardConfig)}
-                    />
-                  </Field>
+                  <div className="driver-row-actions">
+                    <button
+                      type="button"
+                      className="btn btn-secondary btn-icon-only"
+                      onClick={() => handleRemoveDriver(index)}
+                      title="Remove Driver"
+                    >
+                      ×
+                    </button>
+                  </div>
                 </div>
               ))}
+              <div className="driver-actions-row">
+                <button
+                  type="button"
+                  className="btn btn-secondary btn-small"
+                  onClick={handleAddDriver}
+                >
+                  + Add Driver
+                </button>
+              </div>
             </div>
           </section>
 
@@ -644,12 +870,16 @@ function App() {
             </div>
             <div className="segment-picker">
               {availableColumns
-                .filter((column) => ![
-                  wizardConfig.date_column,
-                  wizardConfig.primary_num,
-                  wizardConfig.primary_den,
-                  ...wizardConfig.drivers.flatMap((driver) => [driver.num, driver.den]),
-                ].includes(column))
+                .filter((column) => {
+                  const parsedPri = parseRatioFormula(wizardConfig.primary_formula);
+                  const parsedDri = wizardConfig.drivers.map((d) => parseRatioFormula(d.formula)).filter(Boolean);
+                  const mappedCols = [
+                    parsedPri?.num,
+                    parsedPri?.den,
+                    ...parsedDri.flatMap((d) => [d.num, d.den]),
+                  ].filter(Boolean);
+                  return ![wizardConfig.date_column, ...mappedCols].includes(column);
+                })
                 .map((column) => (
                   <label className="check-pill" key={column}>
                     <input
@@ -719,6 +949,37 @@ function App() {
           </section>
 
           {formErrors.length > 0 && <GuardrailPanel issues={formErrors} />}
+
+          {history.length > 0 && (
+            <section className="panel history-panel-section">
+              <div className="section-heading">
+                <div>
+                  <h2>Recent investigations</h2>
+                  <p>Restore previously executed diagnostic sessions instantly.</p>
+                </div>
+                <Badge tone="green">{history.length} saved</Badge>
+              </div>
+              <div className="history-grid">
+                {history.map((item) => (
+                  <div key={item.id} className="history-card" onClick={() => loadFromHistory(item)}>
+                    <div className="history-card-main">
+                      <Badge tone="neutral">{item.config.metric}</Badge>
+                      <h3>{item.fileName}</h3>
+                      <small>Analysed on {item.date}</small>
+                    </div>
+                    <button
+                      className="btn-delete"
+                      onClick={(e) => deleteFromHistory(item.id, e)}
+                      title="Delete entry"
+                      type="button"
+                    >
+                      ×
+                    </button>
+                  </div>
+                ))}
+              </div>
+            </section>
+          )}
 
           <section className="panel">
             <div className="section-heading">
@@ -838,6 +1099,7 @@ function App() {
             )}
             {activeStep === 5 && <ComparisonModule result={results.comparison} cohort={currentSummary.cohort} />}
             {activeStep === 6 && <HypothesisModule result={results.hypothesis} onExport={handleExportBrief} />}
+            {activeStep === 7 && <BriefModule brief={buildBrief()} onCopy={handleCopyBrief} onExport={handleExportBrief} />}
           </section>
         </section>
       </main>
@@ -1266,6 +1528,105 @@ function HypothesisModule({ result, onExport }) {
           Export investigation brief
         </button>
       </EvidenceCard>
+    </div>
+  );
+}
+
+function BriefModule({ brief, onCopy, onExport }) {
+  const [copied, setCopied] = useState(false);
+
+  const handleCopy = () => {
+    onCopy(brief);
+    setCopied(true);
+    setTimeout(() => setCopied(false), 2000);
+  };
+
+  const renderMarkdown = (text) => {
+    const lines = text.split("\n");
+    let inList = false;
+    let listItems = [];
+    const htmlElements = [];
+
+    const flushList = (key) => {
+      if (listItems.length > 0) {
+        htmlElements.push(
+          <ul key={`list-${key}`} className="brief-ul">
+            {listItems}
+          </ul>
+        );
+        listItems = [];
+      }
+      inList = false;
+    };
+
+    lines.forEach((line, index) => {
+      const trimmed = line.trim();
+      
+      if (trimmed.startsWith("- ")) {
+        inList = true;
+        const content = trimmed.substring(2);
+        listItems.push(
+          <li key={`li-${index}`} dangerouslySetInnerHTML={{ __html: formatInlineMarkdown(content) }} />
+        );
+        return;
+      }
+      
+      if (inList && !trimmed.startsWith("- ")) {
+        flushList(index);
+      }
+
+      if (trimmed.startsWith("# ")) {
+        htmlElements.push(<h2 key={`h-${index}`} className="brief-h1">{trimmed.substring(2)}</h2>);
+      } else if (trimmed.startsWith("## ")) {
+        htmlElements.push(<h3 key={`h-${index}`} className="brief-h2">{trimmed.substring(3)}</h3>);
+      } else if (trimmed.startsWith("### ")) {
+        htmlElements.push(<h4 key={`h-${index}`} className="brief-h3">{trimmed.substring(4)}</h4>);
+      } else if (trimmed.startsWith(">")) {
+        const cleanLine = trimmed.replace(/^>\s*/, "");
+        if (cleanLine.includes("[!IMPORTANT]") || cleanLine.includes("[!NOTE]") || cleanLine.includes("[!WARNING]")) {
+          return;
+        }
+        htmlElements.push(
+          <blockquote key={`quote-${index}`} className="brief-quote" dangerouslySetInnerHTML={{ __html: formatInlineMarkdown(cleanLine) }} />
+        );
+      } else if (trimmed === "") {
+        // empty space
+      } else {
+        htmlElements.push(
+          <p key={`p-${index}`} className="brief-p" dangerouslySetInnerHTML={{ __html: formatInlineMarkdown(trimmed) }} />
+        );
+      }
+    });
+
+    if (inList) {
+      flushList("end");
+    }
+
+    return htmlElements;
+  };
+
+  const formatInlineMarkdown = (text) => {
+    let formatted = text.replace(/\*\*(.*?)\*\*/g, "<strong>$1</strong>");
+    formatted = formatted.replace(/`(.*?)`/g, "<code>$1</code>");
+    return formatted;
+  };
+
+  return (
+    <div className="module-body brief-module">
+      <div className="brief-actions">
+        <button className="btn btn-primary" onClick={handleCopy} type="button">
+          {copied ? "Copied!" : "Copy to Clipboard"}
+        </button>
+        <button className="btn btn-secondary" onClick={onExport} type="button">
+          <Download size={16} />
+          Export as Markdown
+        </button>
+      </div>
+      <div className="brief-content-card">
+        <div className="brief-preview-rendered">
+          {renderMarkdown(brief)}
+        </div>
+      </div>
     </div>
   );
 }
